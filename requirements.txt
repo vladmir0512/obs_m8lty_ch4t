@@ -1,0 +1,7 @@
+obs-websocket-py>=0.6.1
+twitchio>=2.0
+aiohttp>=3.8
+ffmpeg-python>=0.2.0
+PyYAML>=6.0
+python-dotenv>=1.0.0
+requests>=2.28
