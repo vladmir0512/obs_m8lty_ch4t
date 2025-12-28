@@ -2,10 +2,31 @@ import asyncio
 import os
 import time
 import logging
+import re
 from twitchio.ext import commands
 from twitch_auth import refresh_access_token, write_tokens_to_env, read_tokens_from_env
 
 logger = logging.getLogger(__name__)
+
+
+def _sanitize_content(content: str) -> str:
+    """Sanitize chat content for logging/UI.
+    - Remove URLs
+    - Collapse whitespace
+    - Trim to a reasonable length
+    """
+    if not content:
+        return ""
+    # remove common URL patterns
+    content = re.sub(r"https?://\S+", "", content)
+    content = re.sub(r"www\.\S+", "", content)
+    # collapse whitespace
+    content = re.sub(r"\s+", " ", content).strip()
+    # limit length
+    max_len = 1000
+    if len(content) > max_len:
+        content = content[:max_len-3] + "..."
+    return content
 
 class ChatAggregator:
     def __init__(self, cfg=None):
@@ -242,14 +263,33 @@ class ChatAggregator:
             async def event_ready(self):
                 # avoid accessing attributes that may not exist across twitchio versions
                 bot_ident = getattr(self, 'nick', None) or getattr(self, 'name', None) or getattr(self, 'user', '<bot>')
-                print(f"Twitch bot connected as {bot_ident}. Channels: {channels}")
+                logger.info("Twitch bot connected", extra={"bot": bot_ident, "channels": channels})
 
             async def event_message(self, message):
                 # ignore messages sent by the bot itself
                 if message.echo:
                     return
-                print(f"[{message.channel.name}] {message.author.name}: {message.content}")
-                # Here you can add forwarding to UI, DB, moderation, etc.
+                # call module-level helper so logic is testable without bot instantiation
+                log_chat_message(message)
 
+        # return an instance of the Bot class
         return Bot(token, nick, channels, client_id=client_id, client_secret=client_secret, bot_id=bot_id)
+
+
+def log_chat_message(message):
+    """Log a chat message in a structured way. Extracts/normalizes fields and writes to logger."""
+    channel = getattr(message.channel, 'name', str(message.channel))
+    author = getattr(message.author, 'name', str(message.author))
+    author_id = getattr(message.author, 'id', None) or getattr(message.author, 'user_id', None)
+    tags = getattr(message, 'tags', {}) or {}
+    raw_content = getattr(message, 'content', '')
+    content = _sanitize_content(raw_content)
+
+    logger.info("chat.message", extra={
+        "channel": channel,
+        "author": author,
+        "author_id": str(author_id) if author_id is not None else None,
+        "content": content,
+        "tags": tags
+    })
 
