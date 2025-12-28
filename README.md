@@ -64,3 +64,18 @@ Graceful shutdown
 
 - The app now handles SIGINT/SIGTERM and performs a graceful shutdown: it cancels background tasks, stops chat aggregator tasks, and attempts to close running resources before exit.
 - To test: run the app and press Ctrl+C — you should see a clean shutdown sequence in the logs.
+
+### Viewing chat logs (CLI)
+
+A small helper `show_chat.py` is included to tail and format chat messages from `logs/obs_multichat.log`:
+
+```bash
+# show last 10 chat messages
+python show_chat.py
+
+# follow new messages (like tail -f)
+python show_chat.py --follow
+
+# filter by channel or author
+python show_chat.py --follow --channel vj_games
+```
