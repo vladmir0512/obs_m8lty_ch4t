@@ -2,80 +2,127 @@
 
 Простой стартовый шаблон для агрегатора чатов и мультистрима (MVP).
 
-Установка и запуск (Windows PowerShell):
+## ✅ Что работает:
+
+- **Агрегация чата Twitch** — подключение к чату через IRC и TwitchIO
+- **Автоматическое переподключение** — с экспоненциальной задержкой при ошибках
+- **Логирование сообщений** — сохранение в JSON формате (`logs/obs_multichat.log`)
+- **Обновление токенов** — автоматическое обновление OAuth токена при истечении срока
+- **Graceful shutdown** — корректное завершение работы по Ctrl+C
+
+## 🚀 Установка и запуск (Windows PowerShell):
 
 ```powershell
+# 1. Создание виртуального окружения
 python -m venv .venv
+
+# 2. Активация окружения
 .\.venv\Scripts\Activate.ps1
+
+# 3. Установка зависимостей
 pip install -r requirements.txt
 ```
 
-Настройка окружения:
+## ⚙️ Настройка окружения:
 
-1. Скопируйте шаблон `.env.example` в `.env` и заполните свои значения (не коммитить `.env`).
+1. Скопируйте `.env.example` в `.env` и заполните свои значения:
 
 ```powershell
 cp .env.example .env
-# Отредактируйте .env в любом редакторе
 ```
 
-Запуск приложения:
+2. Отредактируйте `.env` файл, добавив:
+   - `TWITCH_CLIENT_ID` — ID приложения Twitch
+   - `TWITCH_CLIENT_SECRET` — Secret приложения Twitch
+   - `TWITCH_IRC_TOKEN` — OAuth токен для IRC (формат: `oauth:xxxxx`)
+   - `TWITCH_BOT_USERNAME` — имя бота
+   - `TWITCH_STREAMER_LOGIN` — логин стримера (канал для отслеживания)
+   - `TWITCH_REFRESH_TOKEN` — токен для обновления
+   - `TWITCH_TOKEN_EXPIRES_AT` — время истечения токена (unix timestamp)
 
-```powershell
-python main.py
-```
-
-Файлы:
-- `requirements.txt` — зависимости
-- `main.py` — точка входа
-- `chat_aggregator.py` — модуль агрегатора чатов (заглушка)
-- `stream_manager.py` — модуль мультистрима (заглушка)
-- `metadata_updater.py` — обновление метаданных (заглушка)
-- `config.yaml` — конфигурация (fallback)
-Дальше: подключить реальные API (Twitch/YouTube), реализовать входы/аутентификацию и интеграцию с OBS.
-
-Twitch reconnection / retry settings (env variables):
-
-- `TWITCH_RETRY_BASE` — base backoff in seconds (default 5)
-- `TWITCH_RETRY_MAX` — maximum backoff in seconds (default 300)
-- `TWITCH_RETRY_MAX_ATTEMPTS` — maximum retry attempts (default none / infinite)
-
-The Twitch bot will automatically retry on crashes/disconnects using exponential backoff.
-
-OAuth helper and token refresh
-
-- Use the helper to perform authorization and store tokens locally:
+3. Получить токены через OAuth (рекомендуется):
 
 ```powershell
 python scripts\twitch_oauth.py
 ```
 
-This will open your browser, let you authorize the bot account and then save `TWITCH_IRC_TOKEN`, `TWITCH_REFRESH_TOKEN` and `TWITCH_TOKEN_EXPIRES_AT` into `.env`.
+## 🏃 Запуск приложения:
 
-- The app includes a background token refresher that will refresh the access token when it is near expiry. It will update `.env` with the new tokens and log refresh events to the log file.
+```powershell
+python main.py
+```
 
-- Optional: if you want the process to exit and let an external supervisor restart the app when a refresh happens, set:
+Приложение запустится и начнет:
+- Подключаться к Twitch чату
+- Слушать сообщения через IRC fallback
+- Логировать все сообщения в `logs/obs_multichat.log`
+
+## 📊 Просмотр логов чата:
+
+```powershell
+# Показать последние 10 сообщений
+python show_chat.py
+
+# Следить за новыми сообщениями (как tail -f)
+python show_chat.py --follow
+
+# Фильтр по каналу
+python show_chat.py --follow --channel vj_games
+
+# Фильтр по автору
+python show_chat.py --follow --author vj_games
+```
+
+## 🛠️ Настройки переподключения Twitch:
+
+Переменные окружения для управления повторными подключениями:
+
+- `TWITCH_RETRY_BASE` — начальная задержка в секундах (по умолчанию 5)
+- `TWITCH_RETRY_MAX` — максимальная задержка в секундах (по умолчанию 300)
+- `TWITCH_RETRY_MAX_ATTEMPTS` — максимальное количество попыток (по умолчанию бесконечно)
+
+Приложение автоматически переподключается при ошибках с экспоненциальной задержкой.
+
+## 🔑 Обновление токенов:
+
+Приложение включает фоновый обновитель токенов, который:
+- Проверяет срок действия токена
+- Автоматически обновляет его при необходимости
+- Сохраняет новые токены в `.env`
+- Логирует события обновления
+
+Опционально: если хотите, чтобы процесс завершался и перезапускался внешним supervisor'ом при обновлении токена:
 
 ```
 TWITCH_RESTART_ON_REFRESH=true
 ```
 
-Graceful shutdown
+## 🛑 Корректное завершение:
 
-- The app now handles SIGINT/SIGTERM and performs a graceful shutdown: it cancels background tasks, stops chat aggregator tasks, and attempts to close running resources before exit.
-- To test: run the app and press Ctrl+C — you should see a clean shutdown sequence in the logs.
+Приложение обрабатывает SIGINT/SIGTERM и выполняет корректное завершение:
+- Отменяет фоновые задачи
+- Останавливает агрегатор чата
+- Закрывает все ресурсы
 
-### Viewing chat logs (CLI)
+Для теста: запустите приложение и нажмите Ctrl+C — вы увидите последовательность корректного завершения в логах.
 
-A small helper `show_chat.py` is included to tail and format chat messages from `logs/obs_multichat.log`:
+## 📁 Структура проекта:
 
-```bash
-# show last 10 chat messages
-python show_chat.py
+- `requirements.txt` — зависимости
+- `main.py` — точка входа
+- `chat_aggregator.py` — модуль агрегатора чатов (TwitchIO + IRC fallback)
+- `stream_manager.py` — модуль мультистрима (заглушка)
+- `metadata_updater.py` — обновление метаданных (заглушка)
+- `config.py` — загрузка конфигурации
+- `twitch_auth.py` — утилиты для аутентификации
+- `show_chat.py` — просмотрщик логов чата
+- `scripts/twitch_oauth.py` — OAuth авторизация
+- `logs/obs_multichat.log` — логи чата (JSON)
 
-# follow new messages (like tail -f)
-python show_chat.py --follow
+## 🎯 Дальше:
 
-# filter by channel or author
-python show_chat.py --follow --channel vj_games
-```
+- Подключить реальные API (Twitch/YouTube/VK)
+- Реализовать мультистрим через ffmpeg
+- Интеграция с OBS WebSocket
+- Веб-интерфейс для управления
+- Поддержка множества платформ

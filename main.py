@@ -4,11 +4,13 @@ from chat_aggregator import ChatAggregator
 from stream_manager import StreamManager
 from metadata_updater import MetadataUpdater
 from config import load_config
+import os
 from logger import setup_logging
 import logging
 
-# initialize logging
-logger = setup_logging()
+# initialize logging; allow overriding via LOG_LEVEL env var
+log_level = os.getenv("LOG_LEVEL", "INFO")
+logger = setup_logging(level=log_level)
 
 async def main():
     config = load_config()
@@ -17,27 +19,21 @@ async def main():
     stream = StreamManager(config.get("stream", {}))
     meta = MetadataUpdater(config.get("metadata", {}))
 
-    # start chat aggregator as a background task so we can cancel on signal
+    # start chat aggregator as a background task
     chat_task = asyncio.create_task(chat.start())
 
-    loop = asyncio.get_running_loop()
-    stop_event = asyncio.Event()
-
-    def _on_signal():
-        logger.info("Signal received, shutting down...")
-        stop_event.set()
-
-    for sig in (signal.SIGINT, signal.SIGTERM):
-        try:
-            loop.add_signal_handler(sig, _on_signal)
-        except NotImplementedError:
-            # add_signal_handler may not be implemented on Windows
-            pass
-
+    logger.info("Main loop started - chat aggregator is running")
+    logger.info("Press Ctrl+C to stop")
+    
     try:
-        await stop_event.wait()
+        # Keep running indefinitely until interrupted
+        while True:
+            await asyncio.sleep(1)
+    except KeyboardInterrupt:
+        logger.info("Keyboard interrupt received")
     finally:
         # attempt graceful shutdown
+        logger.info("Shutting down...")
         chat_task.cancel()
         await chat.stop()
         try:

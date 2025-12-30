@@ -87,6 +87,11 @@ class ChatAggregator:
             if refresh_token and client_id and client_secret:
                 self.tasks.append(asyncio.create_task(self._twitch_token_refresher(client_id, client_secret, self._token_refreshed_event)))
                 logger.info("Twitch token refresher task created")
+
+            # Start raw IRC fallback listener to ensure we receive PRIVMSG events
+            # This is now ALWAYS enabled as a reliable fallback since twitchio events may not fire
+            self.tasks.append(asyncio.create_task(self._irc_fallback(irc_token, bot_username or "twitch-bot", streamer)))
+            logger.info("Twitch IRC fallback task created (raw IRC listener)")
         else:
             logger.warning("Twitch config incomplete or missing; skipping Twitch chat.")
 
@@ -100,7 +105,7 @@ class ChatAggregator:
             bot = None
             try:
                 logger.info("[twitch] starting bot (attempt %d)", attempt)
-                bot = self._make_twitch_bot(current_token, nick, channels, client_id, client_secret)
+                bot = self._make_twitch_bot(current_token, nick, channels, client_id, client_secret, bot_id=None)
                 # run bot.start() in a task so we can also wait for token refresh events
                 bot_task = asyncio.create_task(bot.start())
 
@@ -231,22 +236,31 @@ class ChatAggregator:
             while True:
                 await asyncio.sleep(3600)
 
-    def _make_twitch_bot(self, token, nick, channels, client_id=None, client_secret=None):
+    def _make_twitch_bot(self, token, nick, channels, client_id=None, client_secret=None, bot_id=None):
         outer = self
 
         # Try to fetch bot_id using Helix API if possible
-        bot_id = None
-        try:
-            import requests
-            if client_id and token and nick:
-                headers = {"Client-Id": client_id, "Authorization": f"Bearer {token.replace('oauth:', '')}"}
-                resp = requests.get("https://api.twitch.tv/helix/users", params={"login": nick}, headers=headers, timeout=5)
-                if resp.status_code == 200:
-                    data = resp.json()
-                    if data.get("data"):
-                        bot_id = data["data"][0].get("id")
-        except Exception:
-            bot_id = None
+        if bot_id is None:
+            try:
+                import requests
+                if client_id and token and nick:
+                    headers = {"Client-Id": client_id, "Authorization": f"Bearer {token.replace('oauth:', '')}"}
+                    resp = requests.get("https://api.twitch.tv/helix/users", params={"login": nick}, headers=headers, timeout=5)
+                    logger.debug(f"Helix API call for bot_id: status={resp.status_code}")
+                    if resp.status_code == 200:
+                        data = resp.json()
+                        if data.get("data"):
+                            bot_id = data["data"][0].get("id")
+                            logger.info(f"Retrieved bot_id: {bot_id}")
+                        else:
+                            logger.warning("Helix API returned no data")
+                    else:
+                        logger.warning(f"Helix API error: {resp.status_code}")
+            except Exception as e:
+                logger.warning(f"Failed to get bot_id from Helix: {e}")
+                bot_id = None
+        
+        logger.debug(f"Final bot_id: {bot_id}")
 
         class Bot(commands.Bot):
             def __init__(self, token, nick, channels, client_id=None, client_secret=None, bot_id=None):
@@ -258,6 +272,7 @@ class ChatAggregator:
                     kwargs['client_secret'] = client_secret
                 if bot_id:
                     kwargs['bot_id'] = bot_id
+                logger.debug(f"Bot init with kwargs: {kwargs}")
                 super().__init__(irc_token=token, nick=nick, prefix="!", initial_channels=channels, **kwargs)
 
             async def event_ready(self):
@@ -266,18 +281,131 @@ class ChatAggregator:
                 logger.info("Twitch bot connected", extra={"bot": bot_ident, "channels": channels})
 
             async def event_message(self, message):
+                # low-level debug: log raw message object to help diagnosing missing events
+                try:
+                    logger.debug("raw message received", extra={"repr": repr(message), "attrs": {k: getattr(message, k, None) for k in dir(message) if k.startswith("content") or k in ("tags","echo")}})
+                except Exception:
+                    logger.debug("raw message received (could not introspect)")
+
                 # ignore messages sent by the bot itself
-                if message.echo:
+                if getattr(message, 'echo', False):
+                    logger.debug("Ignoring message.echo == True", extra={"author": getattr(message.author, 'name', None)})
                     return
+
+                # echo to console if enabled (helpful for quick checks)
+                if os.getenv("TWITCH_ECHO_MESSAGES", "true").lower() in ("1", "true", "yes"):
+                    try:
+                        print(f"[{getattr(message.channel, 'name', message.channel)}] {getattr(message.author, 'name', message.author)}: {getattr(message, 'content', '')}")
+                    except Exception:
+                        print(repr(message))
+
                 # call module-level helper so logic is testable without bot instantiation
                 log_chat_message(message)
+
+            async def event_join(self, channel, user):
+                try:
+                    logger.debug("event_join", extra={"channel": getattr(channel, 'name', str(channel)), "user": getattr(user, 'name', str(user))})
+                except Exception:
+                    logger.debug("event_join received")
+
+            async def event_part(self, channel, user):
+                try:
+                    logger.debug("event_part", extra={"channel": getattr(channel, 'name', str(channel)), "user": getattr(user, 'name', str(user))})
+                except Exception:
+                    logger.debug("event_part received")
+
+            @commands.command(name="ping")
+            async def ping(self, ctx: commands.Context):
+                """Simple command to test bot responsiveness."""
+                try:
+                    await ctx.send("pong")
+                except Exception:
+                    logger.exception("Failed to send ping response")
 
         # return an instance of the Bot class
         return Bot(token, nick, channels, client_id=client_id, client_secret=client_secret, bot_id=bot_id)
 
+    async def _irc_fallback(self, token, nick, channel):
+        """Raw IRC fallback listener using asyncio streams. Connects directly to Twitch IRC over TLS and forwards PRIVMSG to log_chat_message.
+        This runs in parallel with the twitchio bot and ensures we always receive chat messages.
+        """
+        import ssl, asyncio, random
+        backoff = 5
+        max_backoff = 300
+        while True:
+            try:
+                logger.info("[irc-fallback] connecting to irc.chat.twitch.tv:6697 as %s, joining #%s", nick, channel)
+                ssl_ctx = ssl.create_default_context()
+                reader, writer = await asyncio.open_connection('irc.chat.twitch.tv', 6697, ssl=ssl_ctx)
+
+                # send login
+                writer.write(f"PASS {token}\r\n".encode('utf-8'))
+                writer.write(f"NICK {nick}\r\n".encode('utf-8'))
+                writer.write(f"JOIN #{channel}\r\n".encode('utf-8'))
+                await writer.drain()
+
+                logger.info("[irc-fallback] connected and joined channel")
+                backoff = 5
+
+                while True:
+                    line = await reader.readline()
+                    if not line:
+                        logger.warning("[irc-fallback] connection closed by server")
+                        break
+                    text = line.decode('utf-8', errors='replace').strip()
+                    logger.debug("[irc-fallback] RAW: %s", text[:400])
+                    # PING/PONG
+                    if text.startswith('PING'):
+                        try:
+                            writer.write('PONG :tmi.twitch.tv\r\n'.encode('utf-8'))
+                            await writer.drain()
+                            logger.debug('[irc-fallback] sent PONG')
+                        except Exception:
+                            logger.exception('[irc-fallback] failed to send PONG')
+                        continue
+                    if 'PRIVMSG' in text:
+                        try:
+                            # :user!user@user.tmi.twitch.tv PRIVMSG #channel :message
+                            prefix, rest = text.split(' PRIVMSG ', 1)
+                            user = prefix.split('!')[0].lstrip(':')
+                            chan, msg = rest.split(' :', 1)
+                            # build a minimal message-like object
+                            import types
+                            message = types.SimpleNamespace()
+                            message.channel = types.SimpleNamespace(name=chan.lstrip('#'))
+                            message.author = types.SimpleNamespace(name=user)
+                            message.content = msg
+                            message.tags = {}
+                            message.echo = False
+                            logger.debug('[irc-fallback] parsed PRIVMSG from %s: %s', user, msg[:200])
+                            # forward to structured logger
+                            try:
+                                log_chat_message(message)
+                            except Exception:
+                                logger.exception('[irc-fallback] failed to log chat message')
+                        except Exception:
+                            logger.exception('[irc-fallback] failed to parse PRIVMSG')
+            except asyncio.CancelledError:
+                logger.info('[irc-fallback] cancelled')
+                return
+            except Exception:
+                logger.exception('[irc-fallback] connection error, retrying')
+            # backoff
+            sleep = backoff + random.random() * min(5, backoff)
+            logger.info('[irc-fallback] reconnecting in %.1fs (backoff %ds)', sleep, backoff)
+            await asyncio.sleep(sleep)
+            backoff = min(backoff * 2, max_backoff)
+
 
 def log_chat_message(message):
     """Log a chat message in a structured way. Extracts/normalizes fields and writes to logger."""
+    # basic debug to help diagnose missing events
+    try:
+        raw_content = getattr(message, 'content', '')
+        logger.debug("log_chat_message invoked", extra={"raw_content_preview": raw_content[:200], "echo": getattr(message, 'echo', None)})
+    except Exception:
+        logger.debug("log_chat_message invoked (could not read message attributes)")
+
     channel = getattr(message.channel, 'name', str(message.channel))
     author = getattr(message.author, 'name', str(message.author))
     author_id = getattr(message.author, 'id', None) or getattr(message.author, 'user_id', None)
